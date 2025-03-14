@@ -1,4 +1,4 @@
-name: Windows 10 Tunnel with Serveo
+name: Window 10
 
 on: [push, workflow_dispatch]
 
@@ -8,19 +8,73 @@ jobs:
     timeout-minutes: 9999
 
     steps:
-    - name: Setup Remote Desktop
-      run: |
-        # Enable Remote Desktop on the Windows machine.
-        Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -name "fDenyTSConnections" -Value 0
-        # Enable Windows Firewall rules for Remote Desktop.
-        Enable-NetFirewallRule -DisplayGroup "Remote Desktop"
-        # Require user authentication for RDP connections.
-        Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -name "UserAuthentication" -Value 1
-        # Set the password for the 'runneradmin' user.
-        Set-LocalUser -Name "runneradmin" -Password (ConvertTo-SecureString -AsPlainText "@cyb3rking" -Force)
-      
-    - name: Create Tunnel with Serveo
-      run: |
-        # This SSH command creates a reverse tunnel.
-        # Connections to serveo.net on port 3389 will be forwarded to the local port 3389.
-        ssh -o StrictHostKeyChecking=no -R 3389:localhost:3389 serveo.net
+      - name: Checkout
+        uses: actions/checkout@v2
+
+      - name: Setup Python
+        uses: actions/setup-python@v2
+        with:
+          python-version: '3.x'
+
+      - name: Enable Terminal Services (RDP)
+        run: |
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -name "fDenyTSConnections" -Value 0
+          Enable-NetFirewallRule -DisplayGroup "Remote Desktop"
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -name "UserAuthentication" -Value 1
+          Set-LocalUser -Name "runneradmin" -Password (ConvertTo-SecureString -AsPlainText "@cyb3rking" -Force)
+
+      - name: Create Python TCP Tunnel Script
+        run: |
+          @'
+          import socket
+          import threading
+          import argparse
+
+          def forward(source, destination):
+              """Continuously forward data between two sockets."""
+              while True:
+                  try:
+                      data = source.recv(4096)
+                      if not data:
+                          break
+                      destination.sendall(data)
+                  except Exception as e:
+                      break
+              source.close()
+              destination.close()
+
+          def handle_client(client_socket, target_host, target_port):
+              """Handle incoming connection and start bidirectional forwarding."""
+              try:
+                  remote = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                  remote.connect((target_host, target_port))
+                  threading.Thread(target=forward, args=(client_socket, remote), daemon=True).start()
+                  threading.Thread(target=forward, args=(remote, client_socket), daemon=True).start()
+              except Exception as e:
+                  print(f"Error: {e}")
+                  client_socket.close()
+
+          def start_tunnel(listen_host, listen_port, target_host, target_port):
+              """Start the tunnel server."""
+              server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+              server.bind((listen_host, listen_port))
+              server.listen(5)
+              print(f"Listening on {listen_host}:{listen_port} forwarding to {target_host}:{target_port}")
+              while True:
+                  client_socket, addr = server.accept()
+                  print(f"Connection from {addr[0]}:{addr[1]}")
+                  threading.Thread(target=handle_client, args=(client_socket, target_host, target_port), daemon=True).start()
+
+          if __name__ == "__main__":
+              parser = argparse.ArgumentParser(description="Simple TCP tunnel in Python")
+              parser.add_argument("--listen", required=True, help="Listen address")
+              parser.add_argument("--port", type=int, required=True, help="Listen port")
+              parser.add_argument("--target", required=True, help="Target address")
+              parser.add_argument("--target-port", type=int, required=True, help="Target port")
+              args = parser.parse_args()
+              start_tunnel(args.listen, args.port, args.target, args.target_port)
+          '@ > tcp_tunnel.py
+
+      - name: Run TCP Tunnel
+        run: |
+          python tcp_tunnel.py --listen 0.0.0.0 --port 9999 --target localhost --target-port 3389
